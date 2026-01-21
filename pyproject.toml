@@ -1,0 +1,43 @@
+[project]
+name = "data_center_studies"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.21.1",
+    "pydantic>=2.12.5",
+    "tqdm>=4.67.1",
+    "types-tqdm>=4.67.0",
+    "loguru>=0.7.3",
+    "pandas>=2.3.3",
+    "pandas-stubs>=2.3.3",
+    "numpy>=2.4.1",
+    "gradio>=6.3.0",
+    "plotly>=6.5.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9.0",
+    "mypy>=1.15.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 150
+
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+exclude = ["outputs", "clusterdata"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+disallow_any_generics = false
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+exclude = ["outputs", "clusterdata"]
