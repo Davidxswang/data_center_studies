@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
+from enum import StrEnum
+from datetime import datetime
 
 import pandas as pd
 from loguru import logger
@@ -8,38 +10,42 @@ from pydantic import BaseModel, Field
 from tqdm.rich import tqdm
 
 
-class DataCentreRecord(BaseModel):
-    voltage_level: Literal["Low Voltage Import", "High Voltage Import", "Extra-High Voltage Import"]
-    data_centre_name: str
-    dc_type: Literal["Co-located", "Enterprise"]
-    local_timestamp: str
-    utc_timestamp: str
-    utilisation_ratio: float = Field(ge=0.0)
+class VoltageLevel(StrEnum):
+    LOW = "Low Voltage Import"
+    HIGH = "High Voltage Import"
+    EXTRA_HIGH = "Extra-High Voltage Import"
 
 
-class UKDataCentreData(BaseModel):
-    records: list[DataCentreRecord]
+class DCType(StrEnum):
+    CO_LOCATED = "Co-located"
+    ENTERPRISE = "Enterprise"
 
-    @property
-    def unique_data_centres(self) -> set[str]:
-        return {record.data_centre_name for record in self.records}
 
-    @property
-    def unique_voltage_levels(self) -> set[str]:
-        return {record.voltage_level for record in self.records}
-
-    @property
-    def unique_dc_types(self) -> set[str]:
-        return {record.dc_type for record in self.records}
+class DataCenterRecord(BaseModel):
+    # anonymised_data_centre_name
+    # cleansed_voltage_level
+    # dc_type
+    # ,,,local_timestamp,utc_timestamp,hh_utilisation_ratio
+    id: int = Field(description="The ID of the data center")
+    voltage_level: VoltageLevel
+    dc_type: DCType
+    utilizations: list[float]
+    local_timestamps: list[datetime]
+    utc_timestamps: list[datetime]
 
     def model_post_init(self, context: Any) -> None:
-        logger.info(f"Loaded {len(self.records)} records")
-        logger.info(f"Unique data centres: {len(self.unique_data_centres)}")
-        logger.info(f"Voltage levels: {sorted(self.unique_voltage_levels)}")
-        logger.info(f"DC types: {sorted(self.unique_dc_types)}")
+        if not (len(self.utilizations) == len(self.local_timestamps) == len(self.utc_timestamps)):
+            raise AssertionError(f"Length mismatch: {len(self.utilizations)=}, {len(self.local_timestamps)=}, {len(self.utc_timestamps)=}")
+        # utc timestamps should be monotonically increasing
+        if not all(self.utc_timestamps[i] < self.utc_timestamps[i + 1] for i in range(len(self.utc_timestamps) - 1)):
+            raise AssertionError(f"UTC timestamps are not monotonically increasing: {self.utc_timestamps=}")
 
 
-def process_ukdata(input_data_path: Path) -> UKDataCentreData:
+class UKDataCenterData(BaseModel):
+    records: list[DataCenterRecord]
+
+
+def process_ukdata(input_data_path: Path) -> UKDataCenterData:
     """
     Process UK data centre demand profiles CSV file.
 
@@ -52,241 +58,386 @@ def process_ukdata(input_data_path: Path) -> UKDataCentreData:
     logger.info(f"Reading CSV from {input_data_path}")
     df = pd.read_csv(input_data_path)
 
-    records: list[DataCentreRecord] = []
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing UK data"):
-        record = DataCentreRecord(
-            voltage_level=row["cleansed_voltage_level"],
-            data_centre_name=row["anonymised_data_centre_name"],
-            dc_type=row["dc_type"],
-            local_timestamp=row["local_timestamp"],
-            utc_timestamp=row["utc_timestamp"],
-            utilisation_ratio=float(row["hh_utilisation_ratio"]),
+    records: list[DataCenterRecord] = []
+    unique_data_centers = df["anonymised_data_centre_name"].unique().tolist()
+    for name in tqdm(unique_data_centers):
+        assert name.startswith("Data Centre #")
+        datacenter_id = int(name.replace("Data Centre #", ""))
+        current_data_center_data = df[df["anonymised_data_centre_name"] == name]
+        assert current_data_center_data["cleansed_voltage_level"].nunique() == 1
+        voltage_level = VoltageLevel(current_data_center_data["cleansed_voltage_level"].iloc[0])
+        assert current_data_center_data["dc_type"].nunique() == 1
+        dc_type = DCType(current_data_center_data["dc_type"].iloc[0])
+        current_data_center_data = current_data_center_data.copy().sort_values(by="utc_timestamp").reset_index(drop=True)
+        utilizations = current_data_center_data["hh_utilisation_ratio"].tolist()
+        local_timestamps = [datetime.fromisoformat(timestamp) for timestamp in current_data_center_data["local_timestamp"].tolist()]
+        utc_timestamps = [datetime.fromisoformat(timestamp) for timestamp in current_data_center_data["utc_timestamp"].tolist()]
+        records.append(
+            DataCenterRecord(
+                id=datacenter_id,
+                voltage_level=voltage_level,
+                dc_type=dc_type,
+                utilizations=utilizations,
+                local_timestamps=local_timestamps,
+                utc_timestamps=utc_timestamps,
+            )
         )
-        records.append(record)
 
-    data = UKDataCentreData(records=records)
-    logger.info(f"Processed {len(records)} records from UK data centre profiles")
-
-    return data
+    return UKDataCenterData(records=records)
 
 
-def visualize_ukdata(data: UKDataCentreData) -> str:
+def visualize_ukdata(data: UKDataCenterData) -> str:
     """
-    Visualize the UK data centre demand profiles and return the HTML string.
-
-    This function aggregates data by hour to reduce the output size significantly.
-    With 4M+ records, we cannot embed all raw data in the HTML.
+    Generate an interactive HTML visualization of UK data center utilization data.
 
     Args:
-        data: The data to visualize
+        data: UKDataCenterData containing all data center records
 
     Returns:
-        The HTML string with interactive Plotly visualization
+        str: The HTML content
     """
-    records = data.records
-    total_records = len(records)
-    unique_dcs = sorted(data.unique_data_centres)
-    unique_voltage_levels = sorted(data.unique_voltage_levels)
-    unique_dc_types = sorted(data.unique_dc_types)
-
-    logger.info(f"Processing {total_records} records for visualization (aggregating by hour)")
-
-    # Convert to DataFrame for easier analysis
-    df = pd.DataFrame(
-        [
+    # Prepare data for JavaScript
+    js_data = []
+    for record in data.records:
+        js_data.append(
             {
-                "data_centre": r.data_centre_name,
-                "voltage_level": r.voltage_level,
-                "dc_type": r.dc_type,
-                "timestamp": r.utc_timestamp,
-                "utilisation": r.utilisation_ratio,
+                "id": record.id,
+                "voltage_level": record.voltage_level.value,
+                "dc_type": record.dc_type.value,
+                "utilizations": record.utilizations,
+                "timestamps": [ts.isoformat() for ts in record.utc_timestamps],
             }
-            for r in records
-        ]
-    )
+        )
 
-    # Calculate time range
-    df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
-    min_time = df["timestamp_dt"].min().isoformat()
-    max_time = df["timestamp_dt"].max().isoformat()
-
-    # Calculate summary statistics
-    avg_utilisation = df["utilisation"].mean()
-    max_utilisation = df["utilisation"].max()
-    min_utilisation = df["utilisation"].min()
-
-    # Group by data centre for summary stats
-    dc_stats = df.groupby("data_centre")["utilisation"].agg(["mean", "max", "min", "count"])
-
-    # Get metadata for each DC (voltage level and type)
-    dc_metadata = df.groupby("data_centre")[["voltage_level", "dc_type"]].first()
-
-    # Aggregate data by hour to reduce size
-    # This reduces ~4M records to a manageable size
-    df["hour"] = df["timestamp_dt"].dt.floor("H")
-
-    logger.info("Aggregating data by hour per data centre")
-    dc_series: dict[str, dict[str, Any]] = {}
-
-    for dc_name in tqdm(unique_dcs, desc="Processing data centres"):
-        dc_data = df[df["data_centre"] == dc_name]
-
-        # Aggregate by hour: take mean utilisation for each hour
-        hourly_data = dc_data.groupby("hour")["utilisation"].mean().reset_index()
-        hourly_data = hourly_data.sort_values("hour")
-
-        dc_series[dc_name] = {
-            "timestamps": hourly_data["hour"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist(),
-            "utilisation": hourly_data["utilisation"].round(4).tolist(),
-            "voltage_level": str(dc_metadata.loc[dc_name, "voltage_level"]) if dc_name in dc_metadata.index else "",
-            "dc_type": str(dc_metadata.loc[dc_name, "dc_type"]) if dc_name in dc_metadata.index else "",
-            "mean": float(dc_stats.loc[dc_name, "mean"]) if dc_name in dc_stats.index else 0,  # type: ignore[arg-type]
-            "max": float(dc_stats.loc[dc_name, "max"]) if dc_name in dc_stats.index else 0,  # type: ignore[arg-type]
-            "count": int(dc_stats.loc[dc_name, "count"]) if dc_name in dc_stats.index else 0,  # type: ignore[arg-type]
-        }
-
-    total_aggregated_points = sum(len(dc["timestamps"]) for dc in dc_series.values())
-    logger.info(f"Aggregated {total_records} records to {total_aggregated_points} hourly data points")
-
-    data_payload = {
-        "total_records": total_records,
-        "unique_dcs": unique_dcs,
-        "unique_voltage_levels": unique_voltage_levels,
-        "unique_dc_types": unique_dc_types,
-        "min_time": min_time,
-        "max_time": max_time,
-        "avg_utilisation": float(avg_utilisation),
-        "max_utilisation": float(max_utilisation),
-        "min_utilisation": float(min_utilisation),
-        "dc_series": dc_series,
-    }
-
-    # Create options for dropdowns
-    dc_options = "".join(f'<option value="{name}">{name}</option>' for name in unique_dcs)
-
-    html_str = f"""
-<!doctype html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8"/>
-    <title>UKPN Data Centre Demand Profiles</title>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UK Data Center Utilization Visualization</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
-      body {{ font-family: Arial, sans-serif; margin: 24px; color: #1a1a1a; }}
-      h1 {{ margin-bottom: 8px; }}
-      .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }}
-      .card {{ padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 8px; }}
-      .card h3 {{ margin: 0 0 6px 0; font-size: 14px; color: #555; }}
-      .card p {{ margin: 0; font-size: 18px; font-weight: 600; }}
-      .controls {{ display: grid; grid-template-columns: 1fr; gap: 12px; margin: 16px 0; align-items: end; max-width: 400px; }}
-      .control {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; }}
-      .control label {{ display: block; font-size: 12px; color: #555; margin-bottom: 6px; }}
-      .control select {{ width: 100%; }}
-      .note {{ margin-top: 8px; font-size: 12px; color: #666; }}
-      #chart {{ width: 100%; height: 520px; }}
-      .info {{ margin: 16px 0; padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 8px; }}
-      .info h3 {{ margin: 0 0 8px 0; font-size: 14px; color: #555; }}
-      .info p {{ margin: 6px 0; font-size: 13px; color: #333; }}
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            text-align: center;
+            margin-bottom: 30px;
+            color: #00d4ff;
+            font-size: 2rem;
+            text-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+        }}
+        .controls {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            backdrop-filter: blur(10px);
+        }}
+        .control-group {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }}
+        label {{
+            font-weight: 600;
+            color: #00d4ff;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        select {{
+            padding: 12px;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #e0e0e0;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }}
+        select:hover, select:focus {{
+            border-color: #00d4ff;
+            outline: none;
+            box-shadow: 0 0 15px rgba(0, 212, 255, 0.2);
+        }}
+        select[multiple] {{
+            min-height: 150px;
+        }}
+        select option {{
+            padding: 8px;
+            background: #1a1a2e;
+        }}
+        select option:checked {{
+            background: linear-gradient(0deg, #00d4ff 0%, #0099cc 100%);
+            color: #1a1a2e;
+        }}
+        .chart-container {{
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }}
+        .stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }}
+        .stat-card {{
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }}
+        .stat-value {{
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #00d4ff;
+        }}
+        .stat-label {{
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 5px;
+        }}
+        .help-text {{
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 4px;
+        }}
     </style>
-  </head>
-  <body>
-    <h1>UKPN Data Centre Demand Profiles</h1>
-    <div class="summary">
-      <div class="card"><h3>Total Records</h3><p id="summaryRecords">-</p></div>
-      <div class="card"><h3>Data Centres</h3><p id="summaryDCs">-</p></div>
-      <div class="card"><h3>Time Range</h3><p id="summaryTimeRange" style="font-size: 14px;">-</p></div>
-      <div class="card"><h3>Avg Utilisation</h3><p id="summaryAvgUtil">-</p></div>
-    </div>
+</head>
+<body>
+    <div class="container">
+        <h1>UK Data Center Utilization Dashboard</h1>
 
-    <div class="controls">
-      <div class="control">
-        <label for="dcSelect">Data Centre</label>
-        <select id="dcSelect">
-          {dc_options}
-        </select>
-      </div>
-    </div>
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="total-dcs">{len(data.records)}</div>
+                <div class="stat-label">Total Data Centers</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="selected-count">0</div>
+                <div class="stat-label">Selected Data Centers</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="avg-utilization">-</div>
+                <div class="stat-label">Avg Utilization (Selected)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="data-points">-</div>
+                <div class="stat-label">Data Points</div>
+            </div>
+        </div>
 
-    <div class="info">
-      <h3>Current Selection Info</h3>
-      <p id="selectionInfo">Select a data centre to view its utilisation profile.</p>
-    </div>
+        <div class="controls">
+            <div class="control-group">
+                <label for="dc-select">Data Center IDs (Multi-Select)</label>
+                <select id="dc-select" multiple>
+                </select>
+                <div class="help-text">Hold Ctrl/Cmd to select multiple</div>
+            </div>
+            <div class="control-group">
+                <label for="voltage-filter">Voltage Level</label>
+                <select id="voltage-filter">
+                    <option value="all">All Voltage Levels</option>
+                    <option value="Low Voltage Import">Low Voltage</option>
+                    <option value="High Voltage Import">High Voltage</option>
+                    <option value="Extra-High Voltage Import">Extra-High Voltage</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="type-filter">Data Center Type</label>
+                <select id="type-filter">
+                    <option value="all">All Types</option>
+                    <option value="Co-located">Co-located</option>
+                    <option value="Enterprise">Enterprise</option>
+                </select>
+            </div>
+        </div>
 
-    <div id="chart"></div>
-    <div class="note">
-      <strong>About this data:</strong> UKPN (UK Power Networks) data centre demand profiles showing utilisation ratios (0-1)
-      across different data centres categorized by voltage level and type (Co-located or Enterprise).<br>
-      <strong>Data aggregation:</strong> Original half-hourly data (~{total_records:,} records) has been aggregated to hourly averages
-      (~{total_aggregated_points:,} points) for efficient visualization.<br>
-      Use Plotly interactions: drag to zoom, double-click to reset, hover for values.
+        <div class="chart-container">
+            <div id="utilization-chart" style="height: 500px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div id="distribution-chart" style="height: 400px;"></div>
+        </div>
     </div>
 
     <script>
-      const DATA = {json.dumps(data_payload)};
+        const data = {json.dumps(js_data)};
 
-      function updateSummary() {{
-        document.getElementById('summaryRecords').textContent = DATA.total_records.toLocaleString();
-        document.getElementById('summaryDCs').textContent = DATA.unique_dcs.length;
-        const startDate = new Date(DATA.min_time).toLocaleDateString();
-        const endDate = new Date(DATA.max_time).toLocaleDateString();
-        document.getElementById('summaryTimeRange').textContent = `${{startDate}} - ${{endDate}}`;
-        document.getElementById('summaryAvgUtil').textContent = (DATA.avg_utilisation * 100).toFixed(1) + '%';
-      }}
+        // Populate data center dropdown
+        const dcSelect = document.getElementById('dc-select');
+        const voltageFilter = document.getElementById('voltage-filter');
+        const typeFilter = document.getElementById('type-filter');
 
-      function render() {{
-        const selectedDC = document.getElementById('dcSelect').value;
-        const series = DATA.dc_series[selectedDC];
+        function populateDCDropdown() {{
+            const voltageValue = voltageFilter.value;
+            const typeValue = typeFilter.value;
 
-        if (!series) {{
-          document.getElementById('selectionInfo').textContent = 'No data available for selected data centre.';
-          return;
+            // Remember current selections
+            const currentSelections = Array.from(dcSelect.selectedOptions).map(o => parseInt(o.value));
+
+            dcSelect.innerHTML = '';
+
+            const filteredData = data.filter(dc => {{
+                if (voltageValue !== 'all' && dc.voltage_level !== voltageValue) return false;
+                if (typeValue !== 'all' && dc.dc_type !== typeValue) return false;
+                return true;
+            }});
+
+            filteredData.sort((a, b) => a.id - b.id).forEach(dc => {{
+                const option = document.createElement('option');
+                option.value = dc.id;
+                option.textContent = `DC #${{dc.id}} (${{dc.voltage_level.replace(' Import', '')}}, ${{dc.dc_type}})`;
+                if (currentSelections.includes(dc.id)) {{
+                    option.selected = true;
+                }}
+                dcSelect.appendChild(option);
+            }});
+
+            updateCharts();
         }}
 
-        const x = series.timestamps.map(ts => new Date(ts));
-        const y = series.utilisation;
+        function getSelectedData() {{
+            const selectedIds = Array.from(dcSelect.selectedOptions).map(o => parseInt(o.value));
+            return data.filter(dc => selectedIds.includes(dc.id));
+        }}
 
-        const traces = [{{
-          x: x,
-          y: y,
-          mode: 'lines',
-          name: selectedDC,
-          line: {{ width: 1.5, color: '#1f77b4' }},
-          hovertemplate: 'Time: %{{x}}<br>Utilisation: %{{y:.2%}}<extra></extra>',
-        }}];
+        function updateStats(selectedData) {{
+            document.getElementById('selected-count').textContent = selectedData.length;
 
-        const infoText = `<strong>${{selectedDC}}</strong><br>` +
-                         `Voltage Level: ${{series.voltage_level}}<br>` +
-                         `DC Type: ${{series.dc_type}}<br>` +
-                         `Avg Utilisation: ${{(series.mean * 100).toFixed(1)}}%<br>` +
-                         `Max Utilisation: ${{(series.max * 100).toFixed(1)}}%<br>` +
-                         `Data Points: ${{series.count.toLocaleString()}}`;
+            if (selectedData.length > 0) {{
+                const allUtils = selectedData.flatMap(dc => dc.utilizations);
+                const avgUtil = (allUtils.reduce((a, b) => a + b, 0) / allUtils.length * 100).toFixed(1);
+                document.getElementById('avg-utilization').textContent = avgUtil + '%';
+                document.getElementById('data-points').textContent = allUtils.length.toLocaleString();
+            }} else {{
+                document.getElementById('avg-utilization').textContent = '-';
+                document.getElementById('data-points').textContent = '-';
+            }}
+        }}
 
-        document.getElementById('selectionInfo').innerHTML = infoText;
+        function updateCharts() {{
+            const selectedData = getSelectedData();
+            updateStats(selectedData);
 
-        const layout = {{
-          margin: {{ l: 60, r: 20, t: 30, b: 50 }},
-          xaxis: {{ title: 'Time', type: 'date' }},
-          yaxis: {{
-            title: 'Utilisation Ratio',
-            tickformat: '.0%',
-            range: [0, 1]
-          }},
-          hovermode: 'closest',
-        }};
+            // Time series chart
+            const traces = selectedData.map(dc => ({{
+                x: dc.timestamps.map(t => new Date(t)),
+                y: dc.utilizations.map(u => u * 100),
+                type: 'scatter',
+                mode: 'lines',
+                name: `DC #${{dc.id}}`,
+                line: {{ width: 1.5 }},
+                hovertemplate: `DC #${{dc.id}}<br>%{{x}}<br>Utilization: %{{y:.1f}}%<extra></extra>`
+            }}));
 
-        Plotly.react('chart', traces, layout, {{ responsive: true }});
-      }}
+            const timeLayout = {{
+                title: {{
+                    text: 'Utilization Over Time',
+                    font: {{ color: '#00d4ff', size: 18 }}
+                }},
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: {{ color: '#e0e0e0' }},
+                xaxis: {{
+                    title: 'Time (UTC)',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    linecolor: 'rgba(255,255,255,0.2)'
+                }},
+                yaxis: {{
+                    title: 'Utilization (%)',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    linecolor: 'rgba(255,255,255,0.2)',
+                    range: [0, 100]
+                }},
+                legend: {{
+                    bgcolor: 'rgba(0,0,0,0)',
+                    font: {{ size: 10 }}
+                }},
+                hovermode: 'x unified'
+            }};
 
-      function bindInputs() {{
-        document.getElementById('dcSelect').addEventListener('change', render);
-      }}
+            Plotly.newPlot('utilization-chart', traces.length > 0 ? traces : [{{
+                x: [],
+                y: [],
+                type: 'scatter',
+                mode: 'lines'
+            }}], timeLayout, {{ responsive: true }});
 
-      updateSummary();
-      bindInputs();
-      render();
+            // Distribution chart (box plot)
+            const boxTraces = selectedData.map(dc => ({{
+                y: dc.utilizations.map(u => u * 100),
+                type: 'box',
+                name: `DC #${{dc.id}}`,
+                boxmean: true
+            }}));
+
+            const distLayout = {{
+                title: {{
+                    text: 'Utilization Distribution by Data Center',
+                    font: {{ color: '#00d4ff', size: 18 }}
+                }},
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: {{ color: '#e0e0e0' }},
+                xaxis: {{
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    linecolor: 'rgba(255,255,255,0.2)'
+                }},
+                yaxis: {{
+                    title: 'Utilization (%)',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    linecolor: 'rgba(255,255,255,0.2)',
+                    range: [0, 100]
+                }},
+                showlegend: false
+            }};
+
+            Plotly.newPlot('distribution-chart', boxTraces.length > 0 ? boxTraces : [{{
+                y: [],
+                type: 'box'
+            }}], distLayout, {{ responsive: true }});
+        }}
+
+        // Event listeners
+        dcSelect.addEventListener('change', updateCharts);
+        voltageFilter.addEventListener('change', populateDCDropdown);
+        typeFilter.addEventListener('change', populateDCDropdown);
+
+        // Initialize
+        populateDCDropdown();
+
+        // Select first 3 data centers by default for demo
+        if (dcSelect.options.length > 0) {{
+            for (let i = 0; i < Math.min(3, dcSelect.options.length); i++) {{
+                dcSelect.options[i].selected = true;
+            }}
+            updateCharts();
+        }}
     </script>
-  </body>
+</body>
 </html>
-""".strip()
-
-    return html_str
+"""
+    return html_content
