@@ -1,11 +1,11 @@
 import argparse
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 import gradio as gr
 import plotly.graph_objects as go
 
-from data_processor_2026 import Job, Spot2026, process_2026_spot
+from src.data_processor_2026 import Job, Spot2026
 
 
 def _build_resource_series(jobs: list[Job], gpu_models: list[str]) -> dict[str, Any]:
@@ -125,7 +125,6 @@ def build_app(data: Spot2026) -> gr.Blocks:
     jobs_by_name = {job.name: job for job in jobs}
     job_ids_numeric = sorted(int(name) for name in jobs_by_name.keys() if str(name).isdigit())
     min_job_id = min(job_ids_numeric) if job_ids_numeric else 0
-    max_job_id = max(job_ids_numeric) if job_ids_numeric else 0
 
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -227,6 +226,7 @@ def build_app(data: Spot2026) -> gr.Blocks:
             comp.change(render, inputs=inputs, outputs=[plot, job_stats_md, node_stats_md])
         demo.load(render, inputs=inputs, outputs=[plot, job_stats_md, node_stats_md])
 
+    demo = cast(gr.Blocks, demo)
     return demo
 
 
@@ -260,14 +260,8 @@ def main() -> None:
     args = parser.parse_args()
 
     data: Spot2026
-    try:
-        with open(args.data_json, "r") as f:
-            data = Spot2026.model_validate_json(f.read())
-    except FileNotFoundError:
-        data = process_2026_spot(
-            job_info_path=args.job_info,
-            node_info_path=args.node_info,
-        )
+    with open(args.data_json, "r") as f:
+        data = Spot2026.model_validate_json(f.read())
     demo = build_app(data)
     demo.launch(server_name=args.host, server_port=args.port, share=args.share)
 

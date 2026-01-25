@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from src.data_processor_2025 import process_data_2025, visualize_data_2025
 from src.data_processor_2026 import process_2026_spot, visualize_2026_spot
 from src.data_processor_ukdata import process_ukdata, visualize_ukdata
+from src.pf_simulation_analysis import run_pf_simulation_and_analysis
 
 
 class GloablConfig(BaseModel):
@@ -41,6 +42,9 @@ class GloablConfig(BaseModel):
     def output_ukdata(self) -> Path:
         return self.output_root / "ukdata"
 
+    @property
+    def output_pf_simulation_and_analysis(self) -> Path:
+        return self.output_root / "power_flow"
 
 app = typer.Typer()
 config = GloablConfig()
@@ -63,7 +67,7 @@ def preprocess_2020_trace(
         f.write(html_str)
     logger.info(f"Preprocessed 2025 trace and saved to {output_path}")
 
-    return
+    return None
 
 
 @app.command("preprocess_2026_spot")
@@ -84,7 +88,7 @@ def preprocess_2026_spot(
         f.write(html_str)
     logger.info(f"Preprocessed 2026 spot trace and saved to {output_path}")
 
-    return
+    return None
 
 
 @app.command("preprocess_ukdata")
@@ -104,7 +108,31 @@ def preprocess_ukdata_cmd(
         f.write(html_str)
     logger.info(f"Preprocessed UK data and saved to {output_path}")
 
-    return
+    return None
+
+
+@app.command("pf_simulation_and_analysis")
+def pf_simulation_and_analysis(
+    input_path: Path = typer.Option(config.output_ukdata / "data.json", help="Path to the UK data JSON file"),
+    output_path: Path = typer.Option(config.output_pf_simulation_and_analysis, help="Path to the output directory"),
+    network_name: str = typer.Option("case33bw", help="Name of the network to use"),
+    node_idx: int = typer.Option(18, help="Index of the node to connect the data center"),
+    peak_mw: float = typer.Option(5.0, help="Assumed peak power of the data center in MW"),
+    hours: int = typer.Option(365 * 24, help="Number of hours to simulate"),
+) -> None:
+    """
+    Run a power flow simulation and analysis using UK data center profiles.
+    """
+    run_pf_simulation_and_analysis(
+        data_json_path=input_path,
+        output_dir=output_path,
+        network_name=network_name,
+        node_idx=node_idx,
+        peak_mw=peak_mw,
+        hours=hours,
+    )
+    return None
+
 
 
 if __name__ == "__main__":
