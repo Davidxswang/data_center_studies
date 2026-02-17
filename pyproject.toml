@@ -1,6 +1,6 @@
 [project]
 name = "data_center_studies"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,16 +15,15 @@ dependencies = [
     "gradio>=6.3.0",
     "plotly>=6.5.2",
     "plotly-stubs>=0.1.2",
-    "pandapower>=3.3.2",
-    "matplotlib>=3.10.8",
     "numba>=0.63.1",
-    "lightsim2grid>=0.12.1",
+    "pyarrow>=23.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.9.0",
     "mypy>=1.15.0",
+    "pytest>=9.0.2",
 ]
 
 [tool.ruff]

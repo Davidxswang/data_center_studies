@@ -67,9 +67,9 @@ python main.py --help
 ### Create Visualization of the Dataset
 
 ```bash
-uv run main.py preprocess_2025
-uv run main.py preprocess_2026_spot
-uv run main.py preprocess_ukdata
+uv run python main.py preprocess_2025
+uv run python main.py preprocess_2026_spot
+uv run python main.py preprocess_ukdata
 ```
 
 ### Start a Local HTTP Server
@@ -84,6 +84,99 @@ If you have a hard time open the 2026 spot data visualization html, you can also
 
 ```bash
 uv run python src/gradio_2026_spot.py
+```
+
+## Synthetic Benchmark Traces (Uncloaked POI Load)
+
+This repo can generate **synthetic 2-second POI power traces** for a 1 GW AI campus. These traces are **uncloaked** (no BESS/SMR shaping) and are meant to be benchmark inputs for ramp-cloaking / sizing algorithms.
+Power outputs are quantized to 1 kW (0.001 MW) by default to make trace regeneration + hashing stable across machines.
+
+### Generate a Suite of Traces (Parquet recommended)
+
+Parquet output uses `pyarrow` (already included in `pyproject.toml`; run `uv sync` if missing).
+
+Generate 5 scenarios (30 days, 2s, 1000 MW peak POI). Each team uses a checkpoint interval sampled uniformly in [2h, 6h] with jitter so teams do not align:
+
+```bash
+uv run python main.py gen_synth_suite \
+  --base-seed 0 --n-scenarios 5 \
+  --days 30 --dt-seconds 2 --campus-peak-poi-mw 1000 \
+  --checkpoint-storm-count 0 \
+  --checkpoint-interval-mode per_team_uniform \
+  --checkpoint-interval-min-hours 2 \
+  --checkpoint-interval-max-hours 6
+```
+
+Outputs:
+- `outputs/synth/suites/<suite_id>/scenario_seed_*.json`
+- `outputs/synth/suites/<suite_id>/trace_seed_*.parquet`
+- `outputs/synth/suites/<suite_id>/manifest.jsonl` (scenario/trace filenames + canonical content hash)
+
+Note: by default, trace artifacts omit the `timestamp_utc` column to keep files small. Use `t_seconds` with
+the scenario’s `start_utc` if you need timestamps.
+
+Validate that the trace files are exactly reproducible from the scenario JSON alone:
+
+```bash
+uv run python main.py validate_synth_suite \
+  --suite-dir outputs/synth/suites/suite_seed_0_n5_30d_dt2s_peak1000mw
+```
+
+### Generate a Single Scenario + Trace (Debugging / Sharing)
+
+Generate one scenario JSON (the shareable "event log"):
+
+```bash
+uv run python main.py gen_synth_scenario \
+  --seed 42 \
+  --days 30 --dt-seconds 2 --campus-peak-poi-mw 1000
+```
+
+Then generate the corresponding trace from that scenario:
+
+```bash
+uv run python main.py gen_synth_trace \
+  --scenario-path outputs/synth/scenario_seed_42.json \
+  --output-path outputs/synth
+```
+
+### Sweep POI Ramp Limits (Fast Sizing Estimate)
+
+Compute fast MW/MWh requirements for a given ramp limit (ignores inverter saturation). This is a quick sizing
+estimate, not a provable lower bound (it depends on the particular ramp-clipping policy used in
+`src/bess_requirements.py`).
+
+```bash
+uv run python main.py ideal_bess_requirements \
+  --suite-dir outputs/synth/suites/suite_seed_0_n5_30d_dt2s_peak1000mw \
+  --ramp-mw-per-min 100 \
+  --max-traces 5 \
+  --n-workers 5 \
+  --output-dir outputs/synth/frontiers
+```
+
+To sweep ramp limits (100..1000 MW/min in steps of 100) and write an aggregate summary CSV:
+
+```bash
+uv run python main.py ideal_bess_requirements \
+  --suite-dir outputs/synth/suites/suite_seed_0_n5_30d_dt2s_peak1000mw \
+  --ramp-grid-mw-per-min 100,200,300,400,500,600,700,800,900,1000 \
+  --max-traces 5 \
+  --n-workers 10 \
+  --output-dir outputs/synth/frontiers/ideal_sweep_100_1000_n5
+```
+
+### Sweep MW/MWh Feasibility Frontier (Numba-accelerated)
+
+```bash
+uv run python main.py sweep_bess_frontier \
+  --suite-dir outputs/synth/suites/suite_seed_0_n5_30d_dt2s_peak1000mw \
+  --ramp-mw-per-min 100 \
+  --p-grid-mw 50,75,100,125,150,200,250,300 \
+  --e-grid-mwh 100,200,300,400,500,600,700,800,1000 \
+  --max-traces 5 \
+  --n-workers 5 \
+  --output-dir outputs/synth/frontiers
 ```
 
 ## 2026 Update: Trends, Challenges, and Research
@@ -182,3 +275,36 @@ Major tech companies are treating this as a physics/hardware problem:
 51. [arXiv: Wide-Area Power System Oscillations from Large-Scale AI Workloads](https://arxiv.org/abs/2508.16457)
 52. [RMI: PJM's Speed to Power Problem](https://rmi.org/pjms-speed-to-power-problem-and-how-to-fix-it/)
 53. [IEEE 2800 Standard: How It Impacts IBR Interconnection](https://www.zeroemissiongrid.com/insights-press-zeg-blog/ieee-2800-standard-how-it-impacts-ibr-interconnection-and-what-developers-must-know/)
+54. [A Theoretical Framework for Virtual Power Plant Integration with Gigawatt-Scale AI Data Centers: Multi-Timescale Control and Stability Analysis](https://www.arxiv.org/abs/2506.17284)
+55. [Advanced UPS controls mitigate risks of infrastructure stress from AI workloads’ power swings](https://www.vertiv.com/en-emea/about/news-and-insights/articles/blog-posts/advanced-ups-controls--mitigate-risks-of-infrastructure-stress-from-ai-workloads-power-swings/)
+56. [BESS Self-Qualification Guidelines](https://docs.nvidia.com/datacenter/dsx/BESS-Self-Qualification-Guidelines.html)
+57. [Advanced UPS controls for AI workloads management](https://www.vertiv.com/4aebc7/globalassets/content---assets-2025/documents/advanced-ups-controls-for-ai-workloads-wp-en-gl-sl-80384-web.pdf)
+58. [Manipulation of Static and Dynamic Data Center Power Responses to Support Grid Operations](https://ieeexplore.ieee.org/document/9211396)
+59. [Sizing of energy storage systems for connection power reduction and power smoothing of electric vehicle charging plazas](https://www.sciencedirect.com/science/article/pii/S0142061525008956)
+60. [NERC Draft Reliability Guideline: Risk Mitigation for Emerging Large Loads (May 2026)](https://www.nerc.com/globalassets/who-we-are/standing-committees/rstc/reliabilityguideline_riskmitigationforemerginglargeloads.pdf)
+61. [arxiv: Mitigation of Datacenter Demand Ramping and Fluctuation using Hybrid ESS and Supercapacitor](https://arxiv.org/abs/2512.08076v1)
+62. [NERC: Characteristics and Risks of Emerging Large Loads: Large Loads Task Force White Paper](https://www.nerc.com/globalassets/who-we-are/standing-committees/rstc/whitepaper-characteristics-and-risks-of-emerging-large-loads.pdf)
+63. [Energy Storage Systems for AI Data Centers: A Review of Technologies, Characteristics, and Applicability](https://www.mdpi.com/1996-1073/19/3/634)
+64. [Enhancing Data Center Low-Voltage Ride-Through](https://arxiv.org/abs/2510.03867)
+65. [(2026 IEEE TPEC) Cascading Failure Model for Power Systems With Large-Scale Data Center Load](https://par.nsf.gov/servlets/purl/10660956)
+66. [Techno-Economic Assessment of Data Center Load Demand Powered by Small Modular Reactors and Distributed Energy Resources](https://www.osti.gov/servlets/purl/3012575)
+67. [Technoeconomic Analysis of Microgrids for AI DataCenters in the Continental United States](https://www.researchsquare.com/article/rs-8272920/v1)
+68. [Programmable Load Risks and System Flexibility: Rethinking Data Center Participation in Modern Power Systems](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5395002)
+69. [A Two-Stage Risk-Averse DRO-MILPMethodological Framework for Managing AI/DataCenter Demand Shocks](https://arxiv.org/pdf/2601.14665)
+70. [Optimal County-Level Siting of Data Centers in the United States](https://arxiv.org/pdf/2601.16315)
+71. [White Paper - Review of Industry Efforts and Standards of Grid Readiness For Data Center Deployment](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11366058)
+72. [Characterizing the Dynamic Hosting Capacity of Distribution Networks Integrated with Distributed GAI Data Center](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11355909)
+73. [From Liability to Asset: A Three-Mode Grid-Forming Control Framework for Centralized Data Center UPS Systems](https://arxiv.org/abs/2512.16497)
+74. [Model-Based Reinforcement Learning for Distributed Energy Trading in Data Center Microgrids](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11331999)
+75. [Technical Challenges of AI Data Center Integration into Power Grids—A Survey](https://www.mdpi.com/1996-1073/19/1/137)
+76. [Texas Loads Ride Toward Grid Stability: Voltage Ride Through of Large Power Electronic Loads](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11131376)
+77. [Scalable Data Centers - Power Generation and Delivery Challenges and Solutions](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5221648)
+78. [Using Grid-Forming Energy Storage Systems to Provide Dynamic Active Power Support for Hyperscale Data Center](https://www.techrxiv.org/doi/full/10.36227/techrxiv.176231592.22658117)
+79. [Power Stabilization for AI Training Datacenters](https://arxiv.org/abs/2508.14318)
+80. [Data centers in the age of AI: A tutorial survey on infrastructure, sustainability, and emerging challenges](https://www.techrxiv.org/doi/full/10.36227/techrxiv.176158592.23065552)
+81. [Strengthening Data Center Operations Through Battery Energy Storage Systems](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5583916)
+82. [Best Practices for Large Load Interconnections: A North American Perspective on Data Centers](https://arxiv.org/abs/2601.12686)
+83. [How DOE’s Proposed Large Load Interconnection Process Could Unlock the Benefits of Load Flexibility](https://dukespace.lib.duke.edu/server/api/core/bitstreams/4ba48e36-5201-4cac-a9f3-2b9b76484dde/content)
+84. [Demonstrating the Data Center as a Flexible Grid Asset using a C-HIL setup](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5561222)
+85. [Characterizing Large Loads: A Taxonomy to Support Large Load Integration](https://csdet.inl.gov/content/uploads/45/2025/11/Characterizing-Large-Loads-A-Taxonomy-to-Support-Large-Load-Integration.pdf)
+86. [Data Center Growth and Grid Readiness (TR131)](https://resourcecenter.ieee-pes.org/publications/technical-reports/pes_tp_tr131_itslc_060225)
