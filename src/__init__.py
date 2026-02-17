@@ -1,6 +1,4 @@
-import warnings
+"""Project modules.
 
-from tqdm import TqdmExperimentalWarning
-
-# TqdmExperimentalWarning is raised when using tqdm with rich
-warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
+We keep a small `src` package so CLIs and tests can import implementation code consistently.
+"""
