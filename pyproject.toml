@@ -22,8 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff>=0.9.0",
-    "mypy>=1.15.0",
     "pytest>=9.0.2",
+    "ty>=0.0.29",
 ]
 
 [tool.ruff]
@@ -34,12 +34,4 @@ line-length = 150
 [tool.ruff.lint]
 exclude = ["outputs", "data", "references"]
 
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_unused_configs = true
-disallow_any_generics = false
-no_implicit_optional = true
-warn_return_any = true
-warn_unused_ignores = true
-exclude = ["outputs", "data", "references"]
+
