@@ -308,3 +308,4 @@ Major tech companies are treating this as a physics/hardware problem:
 84. [Demonstrating the Data Center as a Flexible Grid Asset using a C-HIL setup](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5561222)
 85. [Characterizing Large Loads: A Taxonomy to Support Large Load Integration](https://csdet.inl.gov/content/uploads/45/2025/11/Characterizing-Large-Loads-A-Taxonomy-to-Support-Large-Load-Integration.pdf)
 86. [Data Center Growth and Grid Readiness (TR131)](https://resourcecenter.ieee-pes.org/publications/technical-reports/pes_tp_tr131_itslc_060225)
+87. [ERCOT Long-Term Load Forecast filing in PUCT Project 58777](https://interchange.puc.texas.gov/Documents/58777_38_1622647.PDF)
